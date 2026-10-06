@@ -1,0 +1,86 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-integration}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-integration}
+      POSTGRES_DB: ${POSTGRES_DB:-integration_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-integration}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: src/api/Dockerfile
+    env_file: .env
+    environment:
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://integration:integration@postgres:5432/integration_db}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: src/worker/Dockerfile
+    env_file: .env
+    environment:
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://integration:integration@postgres:5432/integration_db}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: orchestration/Dockerfile
+    env_file: .env
+    environment:
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://integration:integration@postgres:5432/integration_db}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    env_file: .env
+    environment:
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://integration:integration@postgres:5432/integration_db}
+    ports:
+      - "8501:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
