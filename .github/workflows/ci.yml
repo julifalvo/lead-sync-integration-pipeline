@@ -44,3 +44,78 @@ jobs:
 
       - name: Build scheduler image
         run: docker build -f orchestration/Dockerfile -t integration1-scheduler .
+
+      - name: Build dbt image
+        run: docker build -f dbt/Dockerfile -t integration1-dbt .
+
+  integration-smoke-test:
+    runs-on: ubuntu-latest
+    needs: docker-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Boot the stack
+        run: |
+          cp .env.example .env
+          docker compose up -d --build postgres rabbitmq api worker dashboard
+
+      - name: Wait for the API to report healthy
+        run: |
+          for _ in $(seq 1 30); do
+            curl -sf http://localhost:8000/health && exit 0
+            sleep 2
+          done
+          echo "API never became healthy" >&2
+          exit 1
+
+      - name: Send a real HMAC-signed webhook request
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import hmac
+          import json
+          import urllib.request
+
+          secret = b"dev-local-signing-secret"
+          body = json.dumps(
+              {
+                  "external_id": "ci-smoke-test",
+                  "full_name": "CI Smoke Test",
+                  "email": "ci-smoke@example.com",
+                  "company": "GitHub Actions",
+                  "source": "webform",
+              }
+          ).encode()
+          signature = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
+          request = urllib.request.Request(
+              "http://localhost:8000/webhook/leads",
+              data=body,
+              headers={"Content-Type": "application/json", "X-Signature-256": signature},
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=5) as response:
+              assert response.status == 202, response.status
+          print("webhook accepted")
+          PY
+
+      - name: Wait for the worker to sync it into the warehouse (proves the full webhook -> queue -> worker -> db path)
+        run: |
+          for _ in $(seq 1 20); do
+            n=$(docker compose exec -T postgres psql -U integration -d integration_db -tAc \
+              "select count(*) from warehouse.leads where external_id = 'ci-smoke-test'")
+            [ "$n" = "1" ] && exit 0
+            sleep 2
+          done
+          echo "lead never landed in warehouse.leads" >&2
+          exit 1
+
+      - name: Run the dbt mart layer against the seeded data
+        run: docker compose --profile dbt run --rm dbt build
+
+      - name: Dump service logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

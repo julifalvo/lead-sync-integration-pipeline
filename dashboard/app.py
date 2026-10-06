@@ -1,17 +1,20 @@
-"""Streamlit dashboard: synced leads, trend, and recent integration events."""
+"""Streamlit dashboard: synced leads, trend, queue health, and recent events."""
 
 import pandas as pd
 import psycopg
+import requests
 import streamlit as st
 
 from src.common.config import get_settings
 
 st.set_page_config(page_title="Lead Sync Pipeline", page_icon="📊", layout="wide")
 
+settings = get_settings()
+
 
 @st.cache_resource
 def get_connection():
-    return psycopg.connect(get_settings().postgres_dsn, autocommit=True)
+    return psycopg.connect(settings.postgres_dsn, autocommit=True)
 
 
 def run_query(sql: str) -> pd.DataFrame:
@@ -19,10 +22,26 @@ def run_query(sql: str) -> pd.DataFrame:
     return pd.read_sql(sql, conn)
 
 
-st.title("📊 Lead Sync Integration Pipeline")
-st.caption("Webform → Integration API → Redis queue → Worker → CRM (mock) + Warehouse → this dashboard")
+def queue_depth(queue_name: str) -> int | None:
+    try:
+        resp = requests.get(
+            f"{settings.rabbitmq_management_url}/api/queues/%2F/{queue_name}",
+            auth=(settings.rabbitmq_user, settings.rabbitmq_password),
+            timeout=2,
+        )
+        resp.raise_for_status()
+        return resp.json().get("messages", 0)
+    except requests.RequestException:
+        return None
 
-col1, col2, col3, col4 = st.columns(4)
+
+st.title("📊 Lead Sync Integration Pipeline")
+st.caption(
+    "Webform → Integration API (HMAC-verified) → RabbitMQ → Worker (retry/backoff + DLQ) "
+    "→ CRM (mock) + Warehouse → this dashboard"
+)
+
+col1, col2, col3, col4, col5, col6 = st.columns(6)
 
 total_leads = run_query("SELECT count(*) AS n FROM warehouse.leads")["n"].iloc[0]
 total_events = run_query("SELECT count(*) AS n FROM warehouse.integration_events")["n"].iloc[0]
@@ -33,10 +52,22 @@ duplicate_replays = run_query(
     "SELECT count(*) AS n FROM warehouse.integration_events WHERE detail LIKE '%%duplicate replay%%'"
 )["n"].iloc[0]
 
+main_depth = queue_depth(settings.queue_name)
+dlq_depth = queue_depth(settings.dlq_name)
+
 col1.metric("Leads synced", int(total_leads))
 col2.metric("Events processed", int(total_events))
-col3.metric("Errors (recovered via retry/log)", int(error_events))
+col3.metric("Dead-lettered (after retries)", int(error_events))
 col4.metric("Duplicate replays blocked", int(duplicate_replays))
+col5.metric("Queue depth", main_depth if main_depth is not None else "n/a")
+col6.metric("DLQ depth", dlq_depth if dlq_depth is not None else "n/a")
+
+if dlq_depth:
+    st.warning(
+        f"{dlq_depth} message(s) sitting in the dead-letter queue (`{settings.dlq_name}`) -- "
+        "the CRM mock kept failing past the retry budget. Inspect them in the RabbitMQ "
+        "management UI (http://localhost:15672)."
+    )
 
 st.subheader("Leads synced per day")
 daily = run_query(
@@ -72,7 +103,7 @@ with left:
     st.dataframe(events, use_container_width=True, hide_index=True)
 
 with right:
-    st.subheader("Recent errors")
+    st.subheader("Recent errors / dead-letters")
     errors = run_query(
         """
         SELECT occurred_at, external_id, detail

@@ -1,5 +1,5 @@
 import os
 
-os.environ.setdefault("INTEGRATION_API_KEY", "test-api-key")
+os.environ.setdefault("WEBHOOK_SIGNING_SECRET", "test-signing-secret")
 os.environ.setdefault("POSTGRES_DSN", "postgresql://integration:integration@localhost:5432/integration_db")
-os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
+os.environ.setdefault("RABBITMQ_URL", "amqp://integration:integration@localhost:5672/%2F")

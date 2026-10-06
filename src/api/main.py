@@ -1,20 +1,22 @@
-"""Ingestion API: receives simulated web-form submissions and enqueues them.
+"""Ingestion API: receives simulated web-form submissions and publishes them.
 
 This is the "source + integration edge" of the pipeline. It never talks to the
-CRM or warehouse directly -- it validates, authenticates, deduplicates at the
-queue boundary (idempotency key) and hands off to the worker via Redis so a
-slow/failing downstream never blocks the form submitter.
+CRM or warehouse directly -- it verifies the webhook signature, validates the
+payload, and publishes to RabbitMQ (with publisher confirms) so a slow or
+failing downstream never blocks the form submitter.
 """
 
-import redis
+import pika
 from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
-from src.api.auth import require_api_key
-from src.api.queue import enqueue_lead, get_redis
+from src.api.publisher import check_broker, publish_lead
+from src.api.signature import verify_signature
 from src.common.config import get_settings
 from src.common.db import get_conn
 from src.common.logging import get_logger, log_event
+from src.common.metrics import leads_ingested_total, webhook_rejections_total
 from src.common.models import LeadAccepted, LeadIn
 
 settings = get_settings()
@@ -30,18 +32,17 @@ app = FastAPI(
 @app.get("/health")
 def health() -> dict:
     """Liveness/readiness probe used by Docker and the dashboard."""
-    checks = {"postgres": False, "redis": False}
+    checks = {"postgres": False, "rabbitmq": False}
     try:
         with get_conn() as conn:
             conn.execute("SELECT 1")
         checks["postgres"] = True
     except Exception as exc:  # noqa: BLE001
         log_event(logger, "health check: postgres down", level="error", error=str(exc))
-    try:
-        get_redis().ping()
-        checks["redis"] = True
-    except Exception as exc:  # noqa: BLE001
-        log_event(logger, "health check: redis down", level="error", error=str(exc))
+
+    checks["rabbitmq"] = check_broker()
+    if not checks["rabbitmq"]:
+        log_event(logger, "health check: rabbitmq down", level="error")
 
     healthy = all(checks.values())
     status_code = status.HTTP_200_OK if healthy else status.HTTP_503_SERVICE_UNAVAILABLE
@@ -50,23 +51,30 @@ def health() -> dict:
     )
 
 
+@app.get("/metrics")
+def metrics() -> Response:
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 @app.post(
     "/webhook/leads",
     response_model=LeadAccepted,
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(require_api_key)],
+    dependencies=[Depends(verify_signature)],
 )
 def receive_lead(lead: LeadIn) -> LeadAccepted:
-    """Accept a lead submission and enqueue it for asynchronous processing."""
+    """Accept a signed lead submission and publish it for asynchronous processing."""
     try:
-        enqueue_lead(lead.model_dump(mode="json"))
-    except redis.RedisError as exc:
+        publish_lead(lead.model_dump(mode="json"))
+    except pika.exceptions.AMQPError as exc:
+        webhook_rejections_total.labels(reason="broker_unavailable").inc()
         log_event(
-            logger, "failed to enqueue lead", level="error", external_id=lead.external_id, error=str(exc)
+            logger, "failed to publish lead", level="error", external_id=lead.external_id, error=str(exc)
         )
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="queue unavailable"
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="broker unavailable"
         ) from exc
 
+    leads_ingested_total.labels(source=lead.source).inc()
     log_event(logger, "lead accepted", external_id=lead.external_id, source=lead.source)
     return LeadAccepted(external_id=lead.external_id)

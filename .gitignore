@@ -10,3 +10,4 @@ venv/
 .coverage
 htmlcov/
 scripts/.recordings/
+CLAUDE.md

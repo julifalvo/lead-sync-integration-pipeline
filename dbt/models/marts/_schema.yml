@@ -1,0 +1,21 @@
+version: 2
+
+models:
+  - name: mart_daily_lead_funnel
+    description: Daily received -> synced -> dead-lettered funnel.
+    columns:
+      - name: day
+        data_tests:
+          - unique
+          - not_null
+      - name: dead_letter_rate_pct
+        data_tests:
+          - not_null
+
+  - name: mart_source_performance
+    description: Sync health broken down by lead source.
+    columns:
+      - name: source
+        data_tests:
+          - unique
+          - not_null

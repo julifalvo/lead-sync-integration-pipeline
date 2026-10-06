@@ -1,0 +1,15 @@
+version: 2
+
+sources:
+  - name: warehouse
+    schema: warehouse
+    tables:
+      - name: leads
+        description: Silver layer -- one row per lead that was successfully synced to the CRM mock.
+      - name: integration_events
+        description: Audit log of every processing outcome the worker recorded (success/error).
+      - name: raw_lead_events
+        description: >
+          Bronze layer -- every message the worker ever received, verbatim,
+          before any transform or CRM call. Includes leads that were later
+          dead-lettered, which never make it into `leads`.

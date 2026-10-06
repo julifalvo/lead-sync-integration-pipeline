@@ -9,4 +9,6 @@ COPY src ./src
 
 ENV PYTHONPATH=/app
 
+EXPOSE 9100
+
 CMD ["python", "-m", "src.worker.main"]

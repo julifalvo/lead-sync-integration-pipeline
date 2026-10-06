@@ -9,6 +9,9 @@ can see the idempotency guarantee hold (no duplicate rows, a logged
 """
 
 import argparse
+import hashlib
+import hmac
+import json
 import os
 import random
 import time
@@ -21,7 +24,7 @@ from faker import Faker
 fake = Faker()
 
 API_URL = os.getenv("API_URL", "http://localhost:8000")
-API_KEY = os.getenv("INTEGRATION_API_KEY", "dev-local-api-key")
+SIGNING_SECRET = os.getenv("WEBHOOK_SIGNING_SECRET", "dev-local-signing-secret")
 
 SOURCES = ["webform", "landing_page", "partner_referral", "ad_campaign"]
 
@@ -40,14 +43,15 @@ def build_lead(external_id: str, spread_days: int = 0) -> dict:
     return lead
 
 
+def sign(body: bytes) -> str:
+    return "sha256=" + hmac.new(SIGNING_SECRET.encode(), body, hashlib.sha256).hexdigest()
+
+
 def send(lead: dict) -> None:
+    body = json.dumps(lead).encode()
+    headers = {"Content-Type": "application/json", "X-Signature-256": sign(body)}
     try:
-        resp = requests.post(
-            f"{API_URL}/webhook/leads",
-            json=lead,
-            headers={"X-API-Key": API_KEY},
-            timeout=5,
-        )
+        resp = requests.post(f"{API_URL}/webhook/leads", data=body, headers=headers, timeout=5)
         print(f"[{resp.status_code}] {lead['external_id']} {lead['email']}")
     except requests.RequestException as exc:
         print(f"[ERROR] {lead['external_id']}: {exc}")

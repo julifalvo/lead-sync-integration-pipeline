@@ -1,6 +1,19 @@
 """Warehouse load: idempotent upsert into the analytics-facing schema."""
 
+import json
+
 from psycopg import Connection
+
+
+def record_raw_event(conn: Connection, external_id: str, source: str, payload: dict) -> None:
+    """Bronze layer: log the message verbatim, before any transform or CRM call."""
+    conn.execute(
+        """
+        INSERT INTO warehouse.raw_lead_events (external_id, source, payload)
+        VALUES (%(external_id)s, %(source)s, %(payload)s)
+        """,
+        {"external_id": external_id, "source": source, "payload": json.dumps(payload)},
+    )
 
 
 def upsert_lead(conn: Connection, record: dict) -> None:

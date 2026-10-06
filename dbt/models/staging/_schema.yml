@@ -1,0 +1,34 @@
+version: 2
+
+models:
+  - name: stg_leads
+    columns:
+      - name: external_id
+        data_tests:
+          - unique
+          - not_null
+      - name: email
+        data_tests:
+          - not_null
+
+  - name: stg_raw_leads
+    columns:
+      - name: external_id
+        data_tests:
+          - unique
+          - not_null
+      - name: source
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["webform", "landing_page", "partner_referral", "ad_campaign"]
+
+  - name: stg_integration_events
+    columns:
+      - name: status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["success", "error"]
